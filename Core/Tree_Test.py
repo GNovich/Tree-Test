@@ -5,6 +5,7 @@ import pandas as pd
 import scipy.sparse as sp
 from scipy.stats import rv_discrete
 from scipy.spatial.distance import squareform
+from statsmodels.sandbox.stats.multicomp import multipletests
 import pickle
 import os
 
@@ -230,7 +231,7 @@ def GetPhyloParallelScore(tree, with_rand=True):
     """
 
     population = tree.size if 'size' in vars(tree) else (len(tree) * 2) - 1
-    score = np.zeros(tree.dat.shape[1])
+    score = np.zeros(tree.dat.shape[1] - 1)
     node_to_arr = lambda n: np.array(n.dat.todense().astype(np.int))[0]
 
     for i, cur_node in tqdm.tqdm(enumerate(tree.traverse()), total=population, desc='Iterating tree'):
@@ -244,8 +245,7 @@ def GetPhyloParallelScore(tree, with_rand=True):
 
             phen_event = (prev_phen_state - phen_state)
             gene_event = (prev_gene_state - gene_state)
-
-            if with_rand: gene_event[cur_node.up.random] = 0
+            if with_rand: gene_event[cur_node.up.random[1:]] = 0
             score += phen_event * gene_event
 
     return score.astype(np.int)
@@ -312,11 +312,17 @@ def Tree_Test(newick, SparseTable, just_first=False, Tree_save_path=None, Tree_p
     else:
         # load tree
         t = ete3.Tree(newick)
-        for ind in enumerate(t.traverse()): pass
-        t.size = ind
+        for i, n in enumerate(t.traverse()): pass
+        t.size = i + 1
 
         # load data
-        for ind, n in enumerate(t if Reconstruct else t.traverse()):
+        nSamples, nTraits = SparseTable.shape
+        treeSamples = (len(t) if Reconstruct else t.size)
+        if nSamples != treeSamples:
+            raise ValueError(f"Table of %s recorded, but number of samples is %s" % ((nSamples, nTraits), treeSamples))
+        if nTraits < 2:
+            raise ValueError(f"Tree-test works for 2 and more traits, %s recorded" % (nTraits))
+        for ind, n in enumerate(t if Reconstruct else t.traverse()):  # leaves or all nodes
             n.dat = SparseTable[ind]
         if Reconstruct:
             t = MaxParsimony(t)
@@ -324,7 +330,8 @@ def Tree_Test(newick, SparseTable, just_first=False, Tree_save_path=None, Tree_p
         GetChangeRates(t)
 
     # Tree-Test
-    res = get_target_first(t) if just_first is None else get_tables(t)
+    res = get_target_first(t) if just_first else get_tables(t)
+    res['pval_bonferroni'] = multipletests(res['pval'], method='bonferroni')[1]
 
     # save tree
     if Tree_save_path is not None:
@@ -334,3 +341,25 @@ def Tree_Test(newick, SparseTable, just_first=False, Tree_save_path=None, Tree_p
         pickler.saveTree(t, Tree_save_path, attr_list, sp_list)
 
     return res
+
+
+def main():
+    n_samples = 100
+    n_traits = 50
+
+    # only leaf information example, and only one target
+    t = ete3.Tree()
+    t.populate(n_samples)
+    Table = sp.random(n_samples, n_traits, density=0.15, format='csr').astype(np.bool).astype(np.int8)
+    results = Tree_Test(t.write(format=1), Table, Reconstruct=True, just_first=True)
+    print(results)
+
+    # all nodes information example, all pairwise comparisons
+    for i, n in enumerate(t.traverse()): pass
+    Table = sp.random(i+1, n_traits, density=0.15, format='csr').astype(np.bool).astype(np.int8)
+    results = Tree_Test(t.write(format=0), Table, Reconstruct=False, just_first=False)
+    print(results)
+
+
+if __name__ == '__main__':
+    main()
